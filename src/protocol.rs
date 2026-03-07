@@ -74,6 +74,22 @@ pub enum Command {
     ReadOTP(u8),
     /// Set baudrate
     SetBaud { baudrate: u32 },
+
+    // === kmbox Custom ISP Commands ===
+    /// kmbox Initialize/Handshake (0x81)
+    /// Simple 4-byte command, no encryption
+    KmboxInit,
+    /// kmbox Write Firmware Block (0x80)
+    /// Format: [0x80, 0x3C, addr_lo, addr_hi, ...60 bytes data]
+    /// No XOR encryption - sends raw firmware data
+    KmboxWrite { address: u16, data: Vec<u8> },
+    /// kmbox Verify Firmware Block (0x82)
+    /// Same format as KmboxWrite
+    KmboxVerify { address: u16, data: Vec<u8> },
+    /// kmbox End ISP (0x83)
+    KmboxEnd,
+    /// Generic kmbox command for fuzzing/exploration
+    KmboxRaw { cmd: u8, data: Vec<u8> },
 }
 
 impl Command {
@@ -139,6 +155,27 @@ impl Command {
 
     pub fn set_baud(baudrate: u32) -> Self {
         Command::SetBaud { baudrate }
+    }
+
+    // kmbox custom commands
+    pub fn kmbox_init() -> Self {
+        Command::KmboxInit
+    }
+
+    pub fn kmbox_write(address: u16, data: Vec<u8>) -> Self {
+        Command::KmboxWrite { address, data }
+    }
+
+    pub fn kmbox_verify(address: u16, data: Vec<u8>) -> Self {
+        Command::KmboxVerify { address, data }
+    }
+
+    pub fn kmbox_end() -> Self {
+        Command::KmboxEnd
+    }
+
+    pub fn kmbox_raw(cmd: u8, data: Vec<u8>) -> Self {
+        Command::KmboxRaw { cmd, data }
     }
 
     // TODO(visiblity)
@@ -274,6 +311,44 @@ impl Command {
                 ];
                 Ok(buf)
             }
+
+            // kmbox custom ISP commands
+            Command::KmboxInit => {
+                // kmbox init: 81 02 00 00
+                Ok(vec![commands::KMBOX_INIT, 0x02, 0x00, 0x00])
+            }
+            Command::KmboxWrite { address, data } => {
+                // kmbox write: 80 3C addr_lo addr_hi [60 bytes data]
+                let mut buf = Vec::with_capacity(4 + data.len());
+                buf.push(commands::KMBOX_WRITE);
+                buf.push(0x3C); // 60 bytes data length
+                buf.push((address & 0xFF) as u8);         // addr low
+                buf.push(((address >> 8) & 0xFF) as u8);  // addr high
+                buf.extend_from_slice(&data);
+                Ok(buf)
+            }
+            Command::KmboxVerify { address, data } => {
+                // kmbox verify: 82 3C addr_lo addr_hi [60 bytes data]
+                let mut buf = Vec::with_capacity(4 + data.len());
+                buf.push(commands::KMBOX_VERIFY);
+                buf.push(0x3C); // 60 bytes data length
+                buf.push((address & 0xFF) as u8);         // addr low
+                buf.push(((address >> 8) & 0xFF) as u8);  // addr high
+                buf.extend_from_slice(&data);
+                Ok(buf)
+            }
+            Command::KmboxEnd => {
+                // kmbox end: 83 02 00 00
+                Ok(vec![commands::KMBOX_END, 0x02, 0x00, 0x00])
+            }
+            Command::KmboxRaw { cmd, data } => {
+                // Generic kmbox command for fuzzing
+                let mut buf = Vec::with_capacity(1 + data.len());
+                buf.push(cmd);
+                buf.extend_from_slice(&data);
+                Ok(buf)
+            }
+
             // TODO: WriteOTP, ReadOTP
             _ => unimplemented!(),
         }

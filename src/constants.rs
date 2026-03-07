@@ -36,4 +36,16 @@ pub mod commands {
     pub const WRITE_OTP: u8 = 0xc3;
     pub const READ_OTP: u8 = 0xc4;
     pub const SET_BAUD: u8 = 0xc5;
+
+    // kmbox custom ISP commands (discovered through USB packet capture)
+    pub const KMBOX_INIT: u8 = 0x81;      // Initialize/handshake
+    pub const KMBOX_WRITE: u8 = 0x80;     // Write firmware block
+    pub const KMBOX_VERIFY: u8 = 0x82;    // Verify firmware block
+    pub const KMBOX_END: u8 = 0x83;       // End ISP session
+
+    // Potential undiscovered commands (for fuzzing)
+    pub const KMBOX_ERASE: u8 = 0x84;     // Erase? (to be tested)
+    pub const KMBOX_READ: u8 = 0x85;      // Read firmware? (to be tested)
+    pub const KMBOX_READ_FLASH: u8 = 0x86; // Read flash? (to be tested)
+    pub const KMBOX_READ_CFG: u8 = 0x87;  // Read config? (to be tested)
 }
