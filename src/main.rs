@@ -103,6 +103,9 @@ enum Commands {
         /// Show verbose output for each command tested
         #[arg(long, short)]
         verbose: bool,
+        /// Include already-known kmbox commands (0x80-0x83)
+        #[arg(long)]
+        include_known: bool,
     },
 }
 
@@ -410,8 +413,13 @@ fn main() -> Result<()> {
         Some(Commands::Kmbox { command }) => {
             handle_kmbox_command(&cli, command)?;
         }
-        Some(Commands::Fuzz { start, end, verbose }) => {
-            handle_fuzz_command(&cli, start, end, *verbose)?;
+        Some(Commands::Fuzz {
+            start,
+            end,
+            verbose,
+            include_known,
+        }) => {
+            handle_fuzz_command(&cli, start, end, *verbose, *include_known)?;
         }
     }
 
@@ -503,7 +511,13 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
 }
 
 /// Handle ISP command fuzzing
-fn handle_fuzz_command(cli: &Cli, start: &str, end: &str, verbose: bool) -> Result<()> {
+fn handle_fuzz_command(
+    cli: &Cli,
+    start: &str,
+    end: &str,
+    verbose: bool,
+    include_known: bool,
+) -> Result<()> {
     use wchisp::protocol::Command;
 
     // Parse hex strings
@@ -521,6 +535,9 @@ fn handle_fuzz_command(cli: &Cli, start: &str, end: &str, verbose: bool) -> Resu
 
     log::info!("Fuzzing ISP commands from 0x{:02x} to 0x{:02x}", start_byte, end_byte);
     log::warn!("⚠ This will send many commands to the device. Make sure you understand the risks!");
+    if !include_known {
+        log::info!("Skipping known kmbox session commands 0x80-0x83; pass --include-known to test them");
+    }
 
     if !cli.usb {
         log::error!("Fuzzing currently only supports USB transport");
@@ -536,6 +553,17 @@ fn handle_fuzz_command(cli: &Cli, start: &str, end: &str, verbose: bool) -> Resu
     let mut successful_commands = Vec::new();
 
     for cmd_byte in start_byte..=end_byte {
+        if !include_known && known_kmbox_command_name(cmd_byte).is_some() {
+            if verbose {
+                log::info!(
+                    "[0x{:02x}] Skipping known kmbox command ({})",
+                    cmd_byte,
+                    known_kmbox_command_name(cmd_byte).unwrap()
+                );
+            }
+            continue;
+        }
+
         // Test formats:
         // Format 1: cmd 02 00 00 (like kmbox init/end)
         // Format 2: cmd 3C 00 00 (like kmbox write/verify)
@@ -634,6 +662,16 @@ fn handle_fuzz_command(cli: &Cli, start: &str, end: &str, verbose: bool) -> Resu
     }
 
     Ok(())
+}
+
+fn known_kmbox_command_name(cmd: u8) -> Option<&'static str> {
+    match cmd {
+        0x80 => Some("write"),
+        0x81 => Some("init"),
+        0x82 => Some("verify"),
+        0x83 => Some("end"),
+        _ => None,
+    }
 }
 
 fn extend_firmware_to_sector_boundary(buf: &mut Vec<u8>) {

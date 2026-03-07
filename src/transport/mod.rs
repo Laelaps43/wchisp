@@ -24,6 +24,14 @@ pub trait Transport {
     }
 
     fn transfer_with_wait(&mut self, cmd: Command, wait: Duration) -> Result<Response> {
+        let skip_echo_check = matches!(
+            cmd,
+            Command::KmboxInit
+                | Command::KmboxWrite { .. }
+                | Command::KmboxVerify { .. }
+                | Command::KmboxEnd
+                | Command::KmboxRaw { .. }
+        );
         let req = &cmd.into_raw()?;
         log::debug!("=> {}   {}", hex::encode(&req[..3]), hex::encode(&req[3..]));
         self.send_raw(&req)?;
@@ -31,11 +39,10 @@ pub trait Transport {
 
         let resp = self.recv_raw(wait)?;
 
-        // kmbox custom commands (0x80-0x8F) don't echo the command byte
-        // They return simple status like "00 00" instead
-        let is_kmbox_cmd = req[0] >= 0x80 && req[0] <= 0x8F;
-
-        if !is_kmbox_cmd {
+        // kmbox commands return a bare status payload and do not echo the request byte.
+        // Match on the command type rather than the numeric range so fuzzing can probe
+        // unknown bytes such as 0x90-0xff without tripping the standard ISP check.
+        if !skip_echo_check {
             anyhow::ensure!(req[0] == resp[0], "response command type mismatch");
         }
 
