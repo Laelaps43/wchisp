@@ -30,8 +30,17 @@ pub trait Transport {
         sleep(Duration::from_micros(1)); // required for some Linux platform
 
         let resp = self.recv_raw(wait)?;
-        anyhow::ensure!(req[0] == resp[0], "response command type mismatch");
-        log::debug!("<= {} {}", hex::encode(&resp[..4]), hex::encode(&resp[4..]));
+
+        // kmbox custom commands (0x80-0x8F) don't echo the command byte
+        // They return simple status like "00 00" instead
+        let is_kmbox_cmd = req[0] >= 0x80 && req[0] <= 0x8F;
+
+        if !is_kmbox_cmd {
+            anyhow::ensure!(req[0] == resp[0], "response command type mismatch");
+        }
+
+        log::debug!("<= {} {}", hex::encode(&resp[..4.min(resp.len())]),
+                    if resp.len() > 4 { hex::encode(&resp[4..]) } else { String::new() });
         Response::from_raw(&resp)
     }
 }

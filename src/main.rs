@@ -555,6 +555,8 @@ fn handle_fuzz_command(cli: &Cli, start: &str, end: &str, verbose: bool) -> Resu
             match trans.transfer(cmd) {
                 Ok(response) => {
                     let resp_len = response.payload().len();
+
+                    // Format response bytes for display
                     let status = if resp_len >= 2 {
                         format!("{:02x} {:02x}", response.payload()[0], response.payload()[1])
                     } else if resp_len >= 1 {
@@ -568,18 +570,37 @@ fn handle_fuzz_command(cli: &Cli, start: &str, end: &str, verbose: bool) -> Resu
                         || response.payload()[0] != 0x00
                         || response.payload()[1] != 0x00;
 
-                    if is_interesting || verbose {
-                        log::info!("  [0x{:02x}] fmt{} → {} bytes: {}{}",
+                    // Always print in verbose mode, or if interesting
+                    if verbose {
+                        // Verbose: show all responses with full hex dump
+                        let hex_preview = if resp_len > 2 {
+                            format!(" [{}]",
+                                response.payload()[..resp_len.min(16)]
+                                    .iter()
+                                    .map(|b| format!("{:02x}", b))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            )
+                        } else {
+                            String::new()
+                        };
+
+                        log::info!("  [0x{:02x}] fmt{} → {} bytes: {}{}{}",
                             cmd_byte,
                             fmt_idx + 1,
                             resp_len,
                             status,
-                            if resp_len > 2 { " ⭐ INTERESTING!" } else { "" }
+                            hex_preview,
+                            if is_interesting { " ⭐" } else { "" }
                         );
-
-                        if resp_len > 2 && verbose {
-                            log::info!("      Full response: {:02x?}", response.payload());
-                        }
+                    } else if is_interesting {
+                        // Non-verbose: only show interesting responses
+                        log::info!("  [0x{:02x}] fmt{} → {} bytes: {} ⭐ INTERESTING!",
+                            cmd_byte,
+                            fmt_idx + 1,
+                            resp_len,
+                            status
+                        );
                     }
 
                     if is_interesting {
