@@ -389,6 +389,12 @@ impl Response {
     }
 
     pub(crate) fn from_raw(raw: &[u8]) -> Result<Self> {
+        // kmbox may return a minimal 2-byte status payload such as `00 00`
+        // instead of the standard WCH framed response.
+        if raw.len() < 4 {
+            return Ok(Response::Ok(raw.to_vec()));
+        }
+
         // FIXME: should raw[1] == 0x00 || raw[1] == 0x82?
         if true {
             let len = raw.pread_with::<u16>(2, scroll::LE)? as usize;
