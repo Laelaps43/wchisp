@@ -153,9 +153,9 @@ enum KmboxCommands {
         /// Optional firmware file used as payload source at the probed offset
         #[arg(long)]
         firmware: Option<String>,
-        /// Send 0x81 init before probing
-        #[arg(long, default_value_t = true)]
-        init: bool,
+        /// Skip the initial 0x81 init packet
+        #[arg(long)]
+        no_init: bool,
         /// Stop after the first ACK(00 00)
         #[arg(long)]
         stop_on_ack: bool,
@@ -557,7 +557,7 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
             len,
             payload,
             firmware,
-            init,
+            no_init,
             stop_on_ack,
         } => {
             let cmd_byte = parse_u8_arg(cmd)?;
@@ -597,7 +597,7 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
                 None
             };
 
-            if *init {
+            if !*no_init {
                 log::info!("Sending kmbox init (0x81) before mapping...");
                 let response = trans.transfer(Command::kmbox_init())?;
                 log::info!("Init response: {}", format_status_bytes(response.payload()));
