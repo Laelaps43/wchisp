@@ -2,7 +2,7 @@ use std::{thread::sleep, time::Duration};
 
 use anyhow::Result;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use hxdmp::hexdump;
 
 use wchisp::{
@@ -130,6 +130,50 @@ enum KmboxCommands {
     },
     /// Probe kmbox device
     Probe {},
+    /// Probe how a command behaves across an address range
+    Map {
+        /// Command byte to send (default: 0x82 verify-style probe)
+        #[arg(long, default_value = "0x82")]
+        cmd: String,
+        /// Start address (inclusive)
+        #[arg(long, default_value = "0x0000")]
+        start: String,
+        /// End address (inclusive)
+        #[arg(long, default_value = "0xffff")]
+        end: String,
+        /// Address step
+        #[arg(long, default_value = "0x003c")]
+        step: String,
+        /// Payload length byte
+        #[arg(long, default_value = "0x3c")]
+        len: String,
+        /// Payload pattern
+        #[arg(long, value_enum, default_value_t = KmboxPayloadPattern::Zero)]
+        payload: KmboxPayloadPattern,
+        /// Optional firmware file used as payload source at the probed offset
+        #[arg(long)]
+        firmware: Option<String>,
+        /// Send 0x81 init before probing
+        #[arg(long, default_value_t = true)]
+        init: bool,
+        /// Stop after the first ACK(00 00)
+        #[arg(long)]
+        stop_on_ack: bool,
+    },
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum KmboxPayloadPattern {
+    Zero,
+    Ff,
+    Inc,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum KmboxStatusKind {
+    Ack,
+    Nack,
+    Other,
 }
 
 #[derive(Subcommand)]
@@ -505,6 +549,146 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
                 log::error!("kmbox commands currently only support USB transport");
             }
         }
+        KmboxCommands::Map {
+            cmd,
+            start,
+            end,
+            step,
+            len,
+            payload,
+            firmware,
+            init,
+            stop_on_ack,
+        } => {
+            let cmd_byte = parse_u8_arg(cmd)?;
+            let start_addr = parse_u16_arg(start)?;
+            let end_addr = parse_u16_arg(end)?;
+            let step_size = parse_u16_arg(step)?;
+            let payload_len = parse_u8_arg(len)?;
+
+            anyhow::ensure!(step_size > 0, "step must be > 0");
+
+            log::info!(
+                "Mapping cmd 0x{:02x} over 0x{:04x}-0x{:04x} step 0x{:04x} len 0x{:02x} payload {:?}",
+                cmd_byte,
+                start_addr,
+                end_addr,
+                step_size,
+                payload_len,
+                payload
+            );
+            if cmd_byte == 0x80 {
+                log::warn!("0x80 is the write opcode; probing it may modify device memory");
+            }
+            if firmware.is_some() {
+                log::info!("Using firmware-backed payload blocks");
+            }
+
+            if !cli.usb {
+                log::error!("kmbox mapping currently only supports USB transport");
+                return Ok(());
+            }
+
+            let device_index = cli.device.unwrap_or(0);
+            let mut trans = UsbTransport::open_nth(device_index)?;
+            let firmware_bytes = if let Some(path) = firmware {
+                Some(std::fs::read(path)?)
+            } else {
+                None
+            };
+
+            if *init {
+                log::info!("Sending kmbox init (0x81) before mapping...");
+                let response = trans.transfer(Command::kmbox_init())?;
+                log::info!("Init response: {}", format_status_bytes(response.payload()));
+            }
+
+            let mut acked = Vec::new();
+            let mut ack_count = 0usize;
+            let mut nack_count = 0usize;
+            let mut other_count = 0usize;
+            let mut error_count = 0usize;
+
+            let mut addr = start_addr;
+            loop {
+                let mut raw = vec![payload_len, (addr & 0xff) as u8, (addr >> 8) as u8];
+                raw.extend(build_kmbox_payload(
+                    *payload,
+                    payload_len as usize,
+                    addr as usize,
+                    firmware_bytes.as_deref(),
+                ));
+
+                match trans.transfer(Command::kmbox_raw(cmd_byte, raw)) {
+                    Ok(response) => {
+                        let status = classify_kmbox_status(response.payload());
+                        match status {
+                            KmboxStatusKind::Ack => {
+                                ack_count += 1;
+                                acked.push(addr);
+                                log::info!(
+                                    "[0x{:04x}] ACK  {}",
+                                    addr,
+                                    format_status_bytes(response.payload())
+                                );
+                                if *stop_on_ack {
+                                    break;
+                                }
+                            }
+                            KmboxStatusKind::Nack => {
+                                nack_count += 1;
+                                log::debug!(
+                                    "[0x{:04x}] NACK {}",
+                                    addr,
+                                    format_status_bytes(response.payload())
+                                );
+                            }
+                            KmboxStatusKind::Other => {
+                                other_count += 1;
+                                log::info!(
+                                    "[0x{:04x}] OTHER {}",
+                                    addr,
+                                    format_status_bytes(response.payload())
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error_count += 1;
+                        log::debug!("[0x{:04x}] ERROR {}", addr, e);
+                    }
+                }
+
+                if addr >= end_addr || end_addr - addr < step_size {
+                    break;
+                }
+                addr = addr.wrapping_add(step_size);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            log::info!("{}", "=".repeat(80));
+            log::info!(
+                "Map summary: ACK={} NACK={} OTHER={} ERROR={}",
+                ack_count,
+                nack_count,
+                other_count,
+                error_count
+            );
+            if acked.is_empty() {
+                log::info!("No ACK addresses found");
+            } else {
+                let preview = acked
+                    .iter()
+                    .take(32)
+                    .map(|addr| format!("0x{:04x}", addr))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                log::info!("ACK addresses: {}", preview);
+                if acked.len() > 32 {
+                    log::info!("... and {} more", acked.len() - 32);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -593,10 +777,13 @@ fn handle_fuzz_command(
                         "empty".to_string()
                     };
 
-                    // Check if response is different from standard "00 00"
-                    let is_interesting = resp_len != 2
-                        || response.payload()[0] != 0x00
-                        || response.payload()[1] != 0x00;
+                    let status_kind = classify_kmbox_status(response.payload());
+                    let is_interesting = !matches!(status_kind, KmboxStatusKind::Ack | KmboxStatusKind::Nack);
+                    let label = match status_kind {
+                        KmboxStatusKind::Ack => "ACK",
+                        KmboxStatusKind::Nack => "NACK",
+                        KmboxStatusKind::Other => "OTHER",
+                    };
 
                     // Always print in verbose mode, or if interesting
                     if verbose {
@@ -617,7 +804,7 @@ fn handle_fuzz_command(
                             cmd_byte,
                             fmt_idx + 1,
                             resp_len,
-                            status,
+                            format!("{} ({})", status, label),
                             hex_preview,
                             if is_interesting { " ⭐" } else { "" }
                         );
@@ -627,7 +814,7 @@ fn handle_fuzz_command(
                             cmd_byte,
                             fmt_idx + 1,
                             resp_len,
-                            status
+                            format!("{} ({})", status, label)
                         );
                     }
 
@@ -671,6 +858,66 @@ fn known_kmbox_command_name(cmd: u8) -> Option<&'static str> {
         0x82 => Some("verify"),
         0x83 => Some("end"),
         _ => None,
+    }
+}
+
+fn parse_u8_arg(input: &str) -> Result<u8> {
+    if input.starts_with("0x") || input.starts_with("0X") {
+        Ok(u8::from_str_radix(&input[2..], 16)?)
+    } else {
+        Ok(input.parse::<u8>()?)
+    }
+}
+
+fn parse_u16_arg(input: &str) -> Result<u16> {
+    if input.starts_with("0x") || input.starts_with("0X") {
+        Ok(u16::from_str_radix(&input[2..], 16)?)
+    } else {
+        Ok(input.parse::<u16>()?)
+    }
+}
+
+fn build_kmbox_payload(
+    pattern: KmboxPayloadPattern,
+    len: usize,
+    offset: usize,
+    firmware: Option<&[u8]>,
+) -> Vec<u8> {
+    if let Some(bytes) = firmware {
+        let mut buf = vec![0u8; len];
+        if offset < bytes.len() {
+            let available = (bytes.len() - offset).min(len);
+            buf[..available].copy_from_slice(&bytes[offset..offset + available]);
+        }
+        return buf;
+    }
+
+    match pattern {
+        KmboxPayloadPattern::Zero => vec![0x00; len],
+        KmboxPayloadPattern::Ff => vec![0xff; len],
+        KmboxPayloadPattern::Inc => (0..len).map(|i| i as u8).collect(),
+    }
+}
+
+fn classify_kmbox_status(payload: &[u8]) -> KmboxStatusKind {
+    if payload.len() == 2 && payload[0] == 0x00 && payload[1] == 0x00 {
+        KmboxStatusKind::Ack
+    } else if payload.len() == 2 && payload[0] == 0x00 && payload[1] == 0x01 {
+        KmboxStatusKind::Nack
+    } else {
+        KmboxStatusKind::Other
+    }
+}
+
+fn format_status_bytes(payload: &[u8]) -> String {
+    if payload.is_empty() {
+        "empty".to_string()
+    } else {
+        payload
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
