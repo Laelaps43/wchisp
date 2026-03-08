@@ -504,11 +504,84 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
                 log::error!("kmbox commands currently only support USB transport");
             }
         }
-        KmboxCommands::Flash { path, no_verify: _ } => {
+        KmboxCommands::Flash { path, no_verify } => {
             log::info!("Flashing kmbox firmware from: {}", path);
-            log::warn!("kmbox flash not yet implemented - use standard wchisp flash for now");
-            // TODO: Implement kmbox flashing
-            unimplemented!("kmbox flash command");
+
+            if !cli.usb {
+                log::error!("kmbox commands currently only support USB transport");
+                return Ok(());
+            }
+
+            let device_index = cli.device.unwrap_or(0);
+            let mut trans = UsbTransport::open_nth(device_index)?;
+
+            let mut firmware = std::fs::read(path)?;
+            extend_firmware_to_kmbox_block_boundary(&mut firmware);
+            let total_blocks = firmware.len() / 60;
+
+            log::info!(
+                "Firmware size after padding: {} bytes ({} blocks)",
+                firmware.len(),
+                total_blocks
+            );
+
+            log::info!("Sending kmbox init command (0x81)...");
+            ensure_kmbox_ack(&trans.transfer(Command::kmbox_init())?, "init")?;
+
+            log::info!("Writing firmware blocks...");
+            for (block_idx, chunk) in firmware.chunks(60).enumerate() {
+                let address = (block_idx * 60) as u16;
+                ensure_kmbox_ack(
+                    &trans.transfer(Command::kmbox_write(address, chunk.to_vec()))?,
+                    "write",
+                )?;
+
+                if block_idx == 0 || (block_idx + 1) % 100 == 0 || block_idx + 1 == total_blocks {
+                    log::info!(
+                        "  write {}/{} @ 0x{:04x}",
+                        block_idx + 1,
+                        total_blocks,
+                        address
+                    );
+                }
+            }
+
+            if *no_verify {
+                log::warn!("Skipping verify");
+            } else {
+                log::info!("Verifying firmware blocks...");
+                for (block_idx, chunk) in firmware.chunks(60).enumerate() {
+                    let address = (block_idx * 60) as u16;
+                    ensure_kmbox_ack(
+                        &trans.transfer(Command::kmbox_verify(address, chunk.to_vec()))?,
+                        "verify",
+                    )?;
+
+                    if block_idx == 0
+                        || (block_idx + 1) % 100 == 0
+                        || block_idx + 1 == total_blocks
+                    {
+                        log::info!(
+                            "  verify {}/{} @ 0x{:04x}",
+                            block_idx + 1,
+                            total_blocks,
+                            address
+                        );
+                    }
+                }
+            }
+
+            log::info!("Sending kmbox end command (0x83)...");
+            match trans.transfer(Command::kmbox_end()) {
+                Ok(response) => {
+                    ensure_kmbox_ack(&response, "end")?;
+                }
+                Err(e) => {
+                    log::warn!("End command did not return cleanly: {}", e);
+                }
+            }
+
+            log::info!("kmbox flash sequence complete");
         }
         KmboxCommands::Read { output, size } => {
             log::info!("Attempting to read {} bytes from kmbox...", size);
@@ -921,10 +994,34 @@ fn format_status_bytes(payload: &[u8]) -> String {
     }
 }
 
+fn ensure_kmbox_ack(response: &wchisp::protocol::Response, stage: &str) -> Result<()> {
+    match classify_kmbox_status(response.payload()) {
+        KmboxStatusKind::Ack => Ok(()),
+        KmboxStatusKind::Nack => anyhow::bail!(
+            "kmbox {} returned NACK ({})",
+            stage,
+            format_status_bytes(response.payload())
+        ),
+        KmboxStatusKind::Other => anyhow::bail!(
+            "kmbox {} returned unexpected payload ({})",
+            stage,
+            format_status_bytes(response.payload())
+        ),
+    }
+}
+
 fn extend_firmware_to_sector_boundary(buf: &mut Vec<u8>) {
     if buf.len() % 1024 != 0 {
         let remain = 1024 - (buf.len() % 1024);
         buf.extend_from_slice(&vec![0; remain]);
+    }
+}
+
+fn extend_firmware_to_kmbox_block_boundary(buf: &mut Vec<u8>) {
+    const KMBOX_BLOCK_SIZE: usize = 60;
+    if buf.len() % KMBOX_BLOCK_SIZE != 0 {
+        let remain = KMBOX_BLOCK_SIZE - (buf.len() % KMBOX_BLOCK_SIZE);
+        buf.extend(std::iter::repeat_n(0u8, remain));
     }
 }
 
