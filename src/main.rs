@@ -486,11 +486,7 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
                 }
 
                 let device_index = cli.device.unwrap_or(0);
-                let mut trans = UsbTransport::open_nth(device_index)?;
-
-                log::info!("Sending kmbox init command (0x81)...");
-                let cmd = Command::kmbox_init();
-                let response = trans.transfer(cmd)?;
+                let (_trans, response) = init_kmbox_transport(device_index, 5)?;
 
                 log::info!("Response: {:02x?}", response.payload());
 
@@ -513,7 +509,7 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
             }
 
             let device_index = cli.device.unwrap_or(0);
-            let mut trans = UsbTransport::open_nth(device_index)?;
+            let (mut trans, _response) = init_kmbox_transport(device_index, 5)?;
 
             let mut firmware = std::fs::read(path)?;
             extend_firmware_to_kmbox_block_boundary(&mut firmware);
@@ -524,9 +520,6 @@ fn handle_kmbox_command(cli: &Cli, command: &KmboxCommands) -> Result<()> {
                 firmware.len(),
                 total_blocks
             );
-
-            log::info!("Sending kmbox init command (0x81)...");
-            ensure_kmbox_ack(&trans.transfer(Command::kmbox_init())?, "init")?;
 
             log::info!("Writing firmware blocks...");
             for (block_idx, chunk) in firmware.chunks(60).enumerate() {
@@ -1008,6 +1001,42 @@ fn ensure_kmbox_ack(response: &wchisp::protocol::Response, stage: &str) -> Resul
             format_status_bytes(response.payload())
         ),
     }
+}
+
+fn init_kmbox_transport(
+    device_index: usize,
+    attempts: usize,
+) -> Result<(UsbTransport, wchisp::protocol::Response)> {
+    use wchisp::protocol::Command;
+
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 1..=attempts {
+        let mut trans = UsbTransport::open_nth(device_index)?;
+        log::info!(
+            "Sending kmbox init command (0x81)...{}",
+            if attempt > 1 {
+                format!(" attempt {attempt}/{attempts}")
+            } else {
+                String::new()
+            }
+        );
+
+        match trans.transfer(Command::kmbox_init()) {
+            Ok(response) => match ensure_kmbox_ack(&response, "init") {
+                Ok(()) => return Ok((trans, response)),
+                Err(e) => last_err = Some(e),
+            },
+            Err(e) => last_err = Some(e),
+        }
+
+        if attempt < attempts {
+            log::warn!("kmbox init failed, retrying...");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("kmbox init failed")))
 }
 
 fn extend_firmware_to_sector_boundary(buf: &mut Vec<u8>) {
